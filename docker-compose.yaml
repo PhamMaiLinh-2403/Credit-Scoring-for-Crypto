@@ -1,0 +1,90 @@
+# docker-compose.yaml
+# This file orchestrates your application services that interact with the Fabric network.
+
+version: '3.7'
+
+networks:
+  swarm-network: # This network must match the one in docker-compose-fabric.yaml
+    name: swarm-network # Explicitly name it, required if external: true in other compose files
+    driver: bridge # Use 'bridge' for single-host development; 'overlay' for Docker Swarm
+
+services:
+  # Python Application Service: Swarm Node App
+  swarm_node_app:
+    container_name: swarm_node_app
+    build:
+      context: ./swarm_node 
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000" # Example: If your node app uses port 8000
+    environment:
+      # Fabric network details for swarm_node_app to connect to blockchain
+      - FABRIC_ORG_MSP_ID=TechcombankMSP
+      - FABRIC_ORG_DOMAIN=techcombank.example.com
+      - FABRIC_PEER_ADDRESS=COORDINATOR_DEVICE_IP:7051
+      - FABRIC_ORDERER_ADDRESS=COORDINATOR_DEVICE_IP:7050
+      - FABRIC_CHANNEL_NAME=mychannel
+      - FABRIC_CHAINCODE_NAME=hash_recorder_chaincode
+      # CouchDB connection details (if your app directly queries CouchDB or passes to chaincode)
+      - COUCHDB_URL=http://COORDINATOR_DEVICE_IP:5984
+      - COUCHDB_USER=admin
+      - COUCHDB_PASSWORD=adminpw
+      # Add any specific environment variables for swarm_node_app here
+      - NODE_ID=node1 # Example: a unique ID for this node
+      - COORDINATOR_URL=http://COORDINATOR_DEVICE_IP:8001 # Example: how nodes find the coordinator
+    volumes:
+      # Mount the necessary crypto material for swarm_node_app
+      # Paths inside container match what blockchain_sdk.py expects (e.g., /app/crypto/...)
+      - ./fabric-network/crypto-config/peerOrganizations/techcombank.example.com/users/Admin@techcombank.example.com/msp:/app/crypto/techcombank/admin/msp:ro
+      - ./fabric-network/crypto-config/peerOrganizations/techcombank.example.com/peers/peer0.techcombank.example.com/tls/ca.crt:/app/crypto/techcombank/peer0/tls/ca.crt:ro
+      - ./fabric-network/crypto-config/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt:/app/crypto/orderer/tls/ca.crt:ro
+      # If your Dockerfile copies the code, a volume mount can be useful for live development
+      # - ./swarm_node_app:/app
+    depends_on:
+      # swarm_node_app needs Fabric services to be up
+      - ca.techcombank.example.com
+      - orderer.example.com
+      - peer0.techcombank.example.com
+      - couchdb0
+      # UNCOMMENT the line below if swarm_node_app MUST start after the coordinator
+      # - coordinator
+    networks:
+      - swarm-network # Connect to the shared Fabric network
+
+  # Python Application Service: Coordinator
+  coordinator:
+    container_name: coordinator
+    build:
+      context: ./coordinator # Assuming 'coordinator' directory contains its Dockerfile and code
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001" # Example: If your coordinator app uses port 8001 for API/communication
+    environment:
+      # Fabric network details for coordinator to connect to blockchain
+      - FABRIC_ORG_MSP_ID=TechcombankMSP
+      - FABRIC_ORG_DOMAIN=techcombank.example.com
+      - FABRIC_PEER_ADDRESS=peer0.techcombank.example.com:7051
+      - FABRIC_ORDERER_ADDRESS=orderer.example.com:7050
+      - FABRIC_CHANNEL_NAME=mychannel
+      - FABRIC_CHAINCODE_NAME=hash_recorder_chaincode
+      # CouchDB connection details (if your app directly queries CouchDB or passes to chaincode)
+      - COUCHDB_URL=http://couchdb0:5984
+      - COUCHDB_USER=admin
+      - COUCHDB_PASSWORD=adminpw
+      # Add any specific environment variables for coordinator here
+      - GLOBAL_MODEL_PATH=/app/models/global_model.h5 # Example: path for model storage
+    volumes:
+      # Mount the necessary crypto material for coordinator
+      - ./fabric-network/crypto-config/peerOrganizations/techcombank.example.com/users/Admin@techcombank.example.com/msp:/app/crypto/techcombank/admin/msp:ro
+      - ./fabric-network/crypto-config/peerOrganizations/techcombank.example.com/peers/peer0.techcombank.example.com/tls/ca.crt:/app/crypto/techcombank/peer0/tls/ca.crt:ro
+      - ./fabric-network/crypto-config/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt:/app/crypto/orderer/tls/ca.crt:ro
+      # If your Dockerfile copies the code, a volume mount can be useful for live development
+      # - ./coordinator:/app
+    depends_on:
+      # Coordinator needs Fabric services to be up
+      - ca.techcombank.example.com
+      - orderer.example.com
+      - peer0.techcombank.example.com
+      - couchdb0
+    networks:
+      - swarm-network # Connect to the shared Fabric network

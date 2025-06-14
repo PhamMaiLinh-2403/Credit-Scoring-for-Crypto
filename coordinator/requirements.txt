@@ -1,0 +1,6 @@
+Flask
+requests
+numpy
+pandas
+scikit-learn
+grpcio

@@ -1,0 +1,92 @@
+# fabric-network/configtx.yaml
+
+Organizations:
+    - &OrdererOrg # An anchor that can be referenced later with *OrdererOrg
+        Name: OrdererMSP
+        ID: OrdererMSP
+        MSPDir: crypto-config/ordererOrganizations/example.com/msp
+
+    - &TechcombankOrg # An anchor for Techcombank
+        Name: TechcombankMSP
+        ID: TechcombankMSP
+        MSPDir: crypto-config/peerOrganizations/techcombank.example.com/msp
+        AnchorPeers:
+            - Host: peer0.techcombank.example.com
+              Port: 7051
+
+Capabilities:
+    Channel: &ChannelCapabilities
+        V2_0: true
+    Orderer: &OrdererCapabilities
+        V2_0: true
+    Application: &ApplicationCapabilities
+        V2_0: true
+
+Application: &ApplicationDefaults
+    Organizations:
+    Policies:
+        Readers:
+            Type: Signature
+            Rule: "OR('TechcombankMSP.member')"
+        Writers:
+            Type: Signature
+            Rule: "OR('TechcombankMSP.member')"
+        Admins:
+            Type: Signature
+            Rule: "OR('TechcombankMSP.admin')"
+
+Orderer: &OrdererDefaults
+    OrdererType: etcdraft
+    EtcdRaft:
+        Consenters:
+            - Host: orderer.example.com
+              Port: 7050
+              ClientTLSCert: crypto-config/ordererOrganizations/example.com/orderers/orderer.example.com/tls/server.crt
+              ServerTLSCert: crypto-config/ordererOrganizations/example.com/orderers/orderer.example.com/tls/server.crt
+    Addresses:
+        - orderer.example.com:7050
+    BatchTimeout: 2s
+    BatchSize:
+        MaxMessageCount: 10
+        AbsoluteMaxBytes: 99 MB
+        PreferredMaxBytes: 512 KB
+    Organizations:
+    Policies:
+        Readers:
+            Type: Signature
+            Rule: "OR('OrdererMSP.member', 'TechcombankMSP.member')"
+        Writers:
+            Type: Signature
+            Rule: "OR('OrdererMSP.member')"
+        Admins:
+            Type: Signature
+            Rule: "OR('OrdererMSP.admin')"
+        BlockValidation:
+            Type: Signature
+            Rule: "OR('OrdererMSP.member')"
+
+Profiles:
+    TwoOrgsOrdererGenesis: # Profile for the orderer genesis block
+        Capabilities: *OrdererCapabilities
+        Orderer:
+            <<: *OrdererDefaults
+            Organizations:
+                - *OrdererOrg
+        Consortiums:
+            SampleConsortium:
+                Organizations:
+                    - *TechcombankOrg
+    TwoOrgsApplicationChannel: # Profile for the application channel
+        Consortium: SampleConsortium
+        Capabilities: *ChannelCapabilities
+        Application:
+            <<: *ApplicationDefaults
+            Organizations:
+                - *TechcombankOrg
+        Orderer:
+            <<: *OrdererDefaults
+            Organizations:
+                - *OrdererOrg
+                # If Techcombank is part of the application channel orderer policies, it should also be listed here
+                # For simplicity, typically only the OrdererOrg is listed under Orderer.Organizations for application channels
+                # unless specific cross-org orderer management policies are being defined.

@@ -1,0 +1,15 @@
+# fabric-network/crypto-config.yaml
+
+OrdererOrgs:
+  - Name: Orderer
+    Domain: example.com
+    Specs:
+      - Hostname: orderer # The hostname for the single orderer node
+
+PeerOrgs:
+  - Name: Techcombank
+    Domain: techcombank.example.com
+    Template:
+      Count: 1 # We'll have one peer for Techcombank: peer0.techcombank.example.com
+    Users: # Software Engine(s) that is allowed to participate in the network
+      Count: 1 # We'll generate one client user for Techcombank (e.g., User1@techcombank.example.com)
