@@ -47,7 +47,7 @@ class SwarmNode:
         # Simulate loading local data. In a real scenario, this would load from disk/DB.
         # For demonstration, let's create a few dummy data points.
         round_to_load = self.current_round + 1
-        file_path = f'./data/data.parquet'
+        file_path = f'./data/flag1_node0_risk.parquet'
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Data file not found for round {round_to_load}: {file_path}")
 
