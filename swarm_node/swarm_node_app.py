@@ -3,24 +3,24 @@ import time
 import os
 import random
 import threading
-import json # For loading/dumping model parameters
+import json
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import SGDRegressor
 
 from flask import Flask, request, jsonify
+import boto3
+from io import BytesIO
 
 app = Flask(__name__)
 
 class SwarmNode:
     instance = None
+    
     def __init__(self, node_id, coordinator_endpoint):
         self.node_id = node_id
-        self.coordinator_endpoint = coordinator_endpoint # e.g., "http://swarm-coordinator:5000"
+        self.coordinator_endpoint = coordinator_endpoint  # e.g., "http://swarm-coordinator:5000"
         self.current_round = 0
-        # self.local_data = self._load_local_data()
-        # self.X = self.local_data.drop('Target', axis = 1)
-        # self.y = self.local_data['Target']
         self._load_local_data()
         self.feature_set = self.X.columns.tolist()
         self.model_params = self._initialize_model()
@@ -36,30 +36,43 @@ class SwarmNode:
 
     def _initialize_model(self):
         # Initializing a simple linear model with random coefficients and intercept
-        # This should match the structure of the model from the Coordinator
         return {
             'coef': {f: 0 for f in self.feature_set},
             'intercept': 0
         }
     
-
     def _load_local_data(self):
-        # Simulate loading local data. In a real scenario, this would load from disk/DB.
-        # For demonstration, let's create a few dummy data points.
-        round_to_load = self.current_round + 1
-        file_path = f'./data/flag1_node0_risk.parquet'
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Data file not found for round {round_to_load}: {file_path}")
+        # NODE_ID will be 'risk' or 'crm'
+        if self.node_id == 'risk':
+            file_name = "combined_risk.parquet"
+        elif self.node_id == 'crm':
+            file_name = "combined_crm.parquet"
+        else:
+            raise ValueError(f"Invalid NODE_ID: {self.node_id}. Must be 'risk' or 'crm'.")
 
-        df = pd.read_parquet(file_path)
+        s3_key = f"nodes/{file_name}"  # Path within the bucket
+        s3_bucket_name = os.environ.get('S3_BUCKET_NAME', 'durian-bucket-titan')  # Use the provided bucket name
 
-        if 'Target' not in df.columns:
-            raise KeyError(f"Target column not found in data for round {round_to_load}")
-        
-        self.local_data = df
-        self.X = df.drop(columns=['Target'])
-        self.y = df['Target']
-        self.feature_set = self.X.columns.tolist()
+        print(f"Node {self.node_id}: Loading data from S3://{s3_bucket_name}/{s3_key}...")
+
+        try:
+            s3 = boto3.client('s3')
+            obj = s3.get_object(Bucket=s3_bucket_name, Key=s3_key)
+            with BytesIO(obj['Body'].read()) as data_buffer:
+                df = pd.read_parquet(data_buffer)
+
+            if 'Target' not in df.columns:
+                raise KeyError(f"Target column not found in data from S3://{s3_bucket_name}/{s3_key}")
+
+            self.local_data = df
+            self.X = df.drop(columns=['Target'])
+            self.y = df['Target']
+            self.feature_set = self.X.columns.tolist()
+            print(f"Node {self.node_id}: Successfully loaded {len(df)} samples from S3.")
+
+        except Exception as e:
+            print(f"Node {self.node_id}: ERROR loading data from S3: {e}")
+            raise
 
     def _train_local_model(self):
         print(f"Node {self.node_id}: Starting local training...")
@@ -69,18 +82,15 @@ class SwarmNode:
             penalty=None, alpha=0.0001,
             max_iter=1, tol=None,
             learning_rate='constant', eta0=0.01,
-            random_state=42 # for reproducibility
+            random_state=42  # for reproducibility
         )
         
-        # Warm-up fit to avoid assignment error
         model.partial_fit(self.X[:1], self.y[:1])
 
         # Prepare initial parameters for SGDRegressor from our dict format
-        # Ensure order matches self.X.columns
         initial_coef = np.array([self.model_params['coef'][f] for f in self.feature_set])
         initial_intercept = np.array([self.model_params['intercept']])
 
-        # partial_fit requires initial_coef and initial_intercept set directly
         model.coef_ = initial_coef
         model.intercept_ = initial_intercept
 
@@ -97,21 +107,28 @@ class SwarmNode:
 
     def _submit_local_update(self):
         """Submits the locally trained model parameters to the Coordinator."""
-        try:
-            print(f"Node {self.node_id}: Sending local model update for round {self.current_round} to Coordinator...")
-            
-            response = requests.post(
-                f"{self.coordinator_endpoint}/receive_model_update", # NEW TARGET: Coordinator's endpoint
-                json={
-                    "node_id": self.node_id,
-                    "local_model_params": self.model_params, # Send your locally trained model
-                    "round_num": self.current_round
-                }
-            )
-            response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
-            print(f"Node {self.node_id}: Update acknowledged by Coordinator: {response.json()}")
-        except requests.exceptions.RequestException as e:
-            print(f"Node {self.node_id}: ERROR submitting update to Coordinator: {e}")
+        retries = 3
+        while retries > 0:
+            try:
+                print(f"Node {self.node_id}: Sending local model update for round {self.current_round} to Coordinator...")
+                response = requests.post(
+                    f"{self.coordinator_endpoint}/receive_model_update",  # NEW TARGET: Coordinator's endpoint
+                    json={
+                        "node_id": self.node_id,
+                        "local_model_params": self.model_params,  # Send your locally trained model
+                        "round_num": self.current_round
+                    }
+                )
+                response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
+                print(f"Node {self.node_id}: Update acknowledged by Coordinator: {response.json()}")
+                return
+            except requests.exceptions.RequestException as e:
+                print(f"Node {self.node_id}: ERROR submitting update to Coordinator: {e}")
+                retries -= 1
+                if retries == 0:
+                    print(f"Node {self.node_id}: Failed to submit model update after 3 retries.")
+                    return
+                time.sleep(5)  # Wait before retrying
 
     def _register_with_coordinator(self):
         """Registers this node with the central Coordinator."""
@@ -128,7 +145,7 @@ class SwarmNode:
             print(f"Node {self.node_id}: ERROR registering with Coordinator: {e}")
             # Exit or retry if registration fails (critical for node operation)
             time.sleep(5)
-            self._register_with_coordinator() # Simple retry
+            self._register_with_coordinator()  # Simple retry
 
 
     # --- Flask API Endpoints ---
@@ -145,7 +162,6 @@ def model_update_endpoint():
     if round_num is None:
         return jsonify({"status": "error", "message": "Missing 'round_num'"}), 400
 
-    # Fallback only if it's explicitly intended
     if global_model is None:
         print(f"Node {node.node_id}: No global model received, initializing new model.")
         global_model = node._initialize_model()
@@ -174,20 +190,15 @@ def run_node_lifecycle(node_instance):
 
     while True:
         print(f"Node {node_instance.node_id}: Waiting for Coordinator to send global model for next round...")
-        # Wait indefinitely for the Coordinator to send a new model
-        # The Coordinator sends the model via the /model_update endpoint, which sets _new_model_event
-        node_instance._new_model_event.clear() # Clear the event before waiting for the next round
+        node_instance._new_model_event.clear()  # Clear the event before waiting for the next round
         
-        # Wait for the event to be set by the /model_update endpoint
-        # Add a timeout to periodically check if the coordinator is alive or if there's a problem
-        if not node_instance._new_model_event.wait(timeout=120): # Wait up to 120 seconds
+        if not node_instance._new_model_event.wait(timeout=120):  # Wait up to 120 seconds
             print(f"Node {node_instance.node_id}: Timeout waiting for global model. Re-registering...")
             if not node_instance._register_with_coordinator():
                 print(f"Node {node_instance.node_id}: Failed to re-register. Exiting.")
-                break # Exit the loop if re-registration fails
-            continue # Continue to wait for model in the next iteration
+                break
+            continue  # Continue to wait for model in the next iteration
 
-        # Fallback: if no global model was received, initialize local model
         with node_instance._model_lock:
             if node_instance.model_params is None:
                 print(f"Node {node_instance.node_id}: No global model received — initializing local model.")
@@ -197,29 +208,22 @@ def run_node_lifecycle(node_instance):
 
         print(f"Node {node_instance.node_id}: Proceeding with training for round {node_instance.current_round}.")
         
-        # Perform local training
         node_instance._train_local_model()
-        
-        # Submit local model update
         node_instance._submit_local_update()
-        
-        # Short delay before starting to wait for the next round
         time.sleep(5)
 
 if __name__ == '__main__':
-    # Get configuration from environment variables (e.g., set by Docker Compose)
     NODE_ID = os.environ.get('NODE_ID', f'swarm-node-{random.randint(1000, 9999)}')
     COORDINATOR_ENDPOINT = os.environ.get('COORDINATOR_ENDPOINT', 'http://localhost:5000')
-    NODE_PORT = int(os.environ.get('NODE_PORT', 5001)) # Default to 5001 to avoid conflict with Coordinator
+    NODE_PORT = int(os.environ.get('NODE_PORT', 5001))  # Default to 5001 to avoid conflict with Coordinator
 
     # Initialize the SwarmNode instance and make it globally accessible for Flask routes
     SwarmNode.instance = SwarmNode(NODE_ID, COORDINATOR_ENDPOINT)
 
     # Start a separate thread for the node's training and submission lifecycle
     node_lifecycle_thread = threading.Thread(target=run_node_lifecycle, args=(SwarmNode.instance,))
-    node_lifecycle_thread.daemon = True # Allow the main program to exit even if this thread is running
+    node_lifecycle_thread.daemon = True  # Allow the main program to exit even if this thread is running
     node_lifecycle_thread.start()
 
     # Run the Flask application
-    # This will expose endpoints like /model_update for the Coordinator to send data to this node
-    app.run(host='00.0.0.0', port=NODE_PORT, debug=False)
+    app.run(host='0.0.0.0', port=NODE_PORT, debug=False)

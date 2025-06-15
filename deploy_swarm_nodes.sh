@@ -1,86 +1,80 @@
 #!/bin/bash
 
-# --- Configuration ---
-# IMPORTANT: Replace with the actual absolute path to your project's root directory on the COORDINATOR
-COORDINATOR_PROJECT_ROOT_PATH="/home/youruser/your-project" # Example: /home/ubuntu/my-blockchain-swarm
+# --- CẤU HÌNH (Cập nhật các giá trị này) ---
+AWS_REGION="ap-southeast-1"  # Ví dụ: Singapore, thay đổi nếu cần
+S3_BUCKET_NAME="durian-bucket-titan"  # Use the provided bucket name
 
-# IMPORTANT: Replace with the actual absolute path to your project's root directory on the SWARM NODES
-SWARM_NODE_PROJECT_ROOT_PATH="/home/youruser/your-project" # Example: /home/ubuntu/my-blockchain-swarm
+COORDINATOR_PROJECT_ROOT_PATH="/home/ubuntu/<YOUR_PROJECT_ROOT_DIRECTORY_NAME>"
+SWARM_NODE_PROJECT_ROOT_PATH="/home/ubuntu/<YOUR_PROJECT_ROOT_DIRECTORY_NAME>"
+SWARM_NODE_SSH_USER="ubuntu"
+SSH_KEY_PATH="/home/ubuntu/.ssh/my-swarm-key.pem"
 
-# IMPORTANT: Replace with the SSH username for your Swarm Node Runner devices
-SWARM_NODE_SSH_USER="youruser" # Example: ubuntu, ec2-user
+# Danh sách các IP RIÊNG TƯ (Private IPs) của các Swarm Node Runners
+# BẠN CẦN LẤY CÁC IP NÀY TỪ AWS CONSOLE SAU KHI TẠO CÁC INSTANCE
+# Sẽ chỉ có 2 IP cho 2 node 'risk' và 'crm'
+SWARM_NODE_IPS=(
+    "PRIVATE_IP_OF_RISK_NODE"  # Ví dụ: 10.0.1.10
+    "PRIVATE_IP_OF_CRM_NODE"   # Ví dụ: 10.0.1.11
+)
 
-# IMPORTANT: List the IP addresses of all your Swarm Node Runner devices
-SWARM_NODE_IPS=("SWARM_NODE_IP_1" "SWARM_NODE_IP_2") # Example: ("192.168.1.101" "192.168.1.102")
+# Danh sách NODE_ID tương ứng với các IP
+NODE_IDS=(
+    "risk"
+    "crm"
+)
 
-# Get the Coordinator Device's IP (same logic as in deploy_coordinator.sh)
-COORDINATOR_DEVICE_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-if [ -z "$COORDINATOR_DEVICE_IP" ]; then
-    COORDINATOR_DEVICE_IP=$(ip -4 addr show wlan0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-fi
+# IP RIÊNG TƯ của Coordinator Device
+COORDINATOR_DEVICE_IP="<COORD_PRIVATE_IP>"  # Ví dụ: 10.0.1.5
 
-if [ -z "$COORDINATOR_DEVICE_IP" ]; then
-    echo "ERROR: Could not determine Coordinator Device IP. Please ensure deploy_coordinator.sh ran successfully."
+# --- HÀM HỖ TRỢ ---
+run_on_remote() {
+    local NODE_IP=$1
+    local COMMAND=$2
+    echo "--> Running on ${NODE_IP}: ${COMMAND}"
+    ssh -i "${SSH_KEY_PATH}" "${SWARM_NODE_SSH_USER}@${NODE_IP}" "${COMMAND}"
+}
+
+copy_to_remote() {
+    local NODE_IP=$1
+    local LOCAL_PATH=$2
+    local REMOTE_PATH=$3
+    echo "--> Copying ${LOCAL_PATH} to ${NODE_IP}:${REMOTE_PATH}"
+    scp -i "${SSH_KEY_PATH}" -r "${LOCAL_PATH}" "${SWARM_NODE_SSH_USER}@${NODE_IP}:${REMOTE_PATH}"
+}
+
+# --- TRIỂN KHAI CHO TỪNG SWARM NODE ---
+if [ ${#SWARM_NODE_IPS[@]} -ne ${#NODE_IDS[@]} ]; then
+    echo "ERROR: Number of SWARM_NODE_IPS does not match number of NODE_IDS."
     exit 1
 fi
 
-echo "--- Starting Swarm Node Runners Deployment ---"
-echo "Coordinator IP for nodes: ${COORDINATOR_DEVICE_IP}"
-echo "Target Swarm Node IPs: ${SWARM_NODE_IPS[*]}"
+for i in "${!SWARM_NODE_IPS[@]}"; do
+    NODE_IP=${SWARM_NODE_IPS[i]}
+    NODE_ID=${NODE_IDS[i]}
 
-# --- Loop through each Swarm Node ---
-NODE_COUNTER=1
-for NODE_IP in "${SWARM_NODE_IPS[@]}"; do
-    NODE_ID="node${NODE_COUNTER}" # Assign a unique NODE_ID for each runner
-    echo ""
-    echo "--- Deploying Swarm Node Runner: ${NODE_IP} (ID: ${NODE_ID}) ---"
+    echo "--- Deploying Swarm Node '${NODE_ID}' at IP: ${NODE_IP} ---"
 
-    # --- 1. Initial Project Setup on Swarm Node ---
-    echo "1. Pulling latest code on ${NODE_IP}..."
-    ssh "${SWARM_NODE_SSH_USER}@${NODE_IP}" "cd ${SWARM_NODE_PROJECT_ROOT_PATH} && git pull origin main" || { echo "ERROR: Failed to pull Git repository on ${NODE_IP}. Skipping this node."; NODE_COUNTER=$((NODE_COUNTER+1)); continue; }
+    # 1. Cập nhật mã nguồn và Dockerfile trên Swarm Node
+    run_on_remote "${NODE_IP}" "cd ${SWARM_NODE_PROJECT_ROOT_PATH} && git pull origin main"
 
-    # --- 2. Create Crypto Dirs on Swarm Node (if they don't exist) ---
-    echo "2. Creating necessary crypto directories on ${NODE_IP}..."
-    ssh "${SWARM_NODE_SSH_USER}@${NODE_IP}" "
-        mkdir -p ${SWARM_NODE_PROJECT_ROOT_PATH}/fabric-network/crypto-config/peerOrganizations/techcombank.example.com/users/Admin@techcombank.example.com/
-        mkdir -p ${SWARM_NODE_PROJECT_ROOT_PATH}/fabric-network/crypto-config/peerOrganizations/techcombank.example.com/peers/peer0.techcombank.example.com/tls/
-        mkdir -p ${SWARM_NODE_PROJECT_ROOT_PATH}/fabric-network/crypto-config/ordererOrganizations/example.com/orderers/orderer.example.com/tls/
-    " || { echo "ERROR: Failed to create crypto directories on ${NODE_IP}. Skipping this node."; NODE_COUNTER=$((NODE_COUNTER+1)); continue; }
+    # 2. Xây dựng lại Docker Image
+    run_on_remote "${NODE_IP}" "cd ${SWARM_NODE_PROJECT_ROOT_PATH} && docker build -f swarm_node/Dockerfile -t swarm_node_app ."
 
-    # --- 3. Copy Fabric Crypto Material to Swarm Node ---
-    echo "3. Copying Fabric crypto material to ${NODE_IP}..."
-    scp -r "${COORDINATOR_PROJECT_ROOT_PATH}/fabric-network/crypto-config/peerOrganizations/techcombank.example.com/users/Admin@techcombank.example.com/msp" \
-        "${SWARM_NODE_SSH_USER}@${NODE_IP}:${SWARM_NODE_PROJECT_ROOT_PATH}/fabric-network/crypto-config/peerOrganizations/techcombank.example.com/users/Admin@techcombank.example.com/" \
-        || { echo "ERROR: Failed to copy Admin MSP to ${NODE_IP}. Skipping this node."; NODE_COUNTER=$((NODE_COUNTER+1)); continue; }
+    # 3. Dừng và xóa container cũ nếu có
+    run_on_remote "${NODE_IP}" "docker stop ${NODE_ID} || true"
+    run_on_remote "${NODE_IP}" "docker rm ${NODE_ID} || true"
 
-    scp "${COORDINATOR_PROJECT_ROOT_PATH}/fabric-network/crypto-config/peerOrganizations/techcombank.example.com/peers/peer0.techcombank.example.com/tls/ca.crt" \
-        "${SWARM_NODE_SSH_USER}@${NODE_IP}:${SWARM_NODE_PROJECT_ROOT_PATH}/fabric-network/crypto-config/peerOrganizations/techcombank.example.com/peers/peer0.techcombank.example.com/tls/" \
-        || { echo "ERROR: Failed to copy Peer TLS CA to ${NODE_IP}. Skipping this node."; NODE_COUNTER=$((NODE_COUNTER+1)); continue; }
+    # 4. Chạy Swarm Node App container mới
+    run_on_remote "${NODE_IP}" "docker run -d --restart always \
+        --name ${NODE_ID} \
+        -e NODE_ID=${NODE_ID} \
+        -e COORDINATOR_ENDPOINT=http://${COORDINATOR_DEVICE_IP}:8001 \
+        -e NODE_PORT=8000 \
+        -e S3_BUCKET_NAME=${S3_BUCKET_NAME} \
+        swarm_node_app"
 
-    scp "${COORDINATOR_PROJECT_ROOT_PATH}/fabric-network/crypto-config/ordererOrganizations/example.com/orderers/orderer.example.com/tls/ca.crt" \
-        "${SWARM_NODE_SSH_USER}@${NODE_IP}:${SWARM_NODE_PROJECT_ROOT_PATH}/fabric-network/crypto-config/ordererOrganizations/example.com/orderers/orderer.example.com/tls/" \
-        || { echo "ERROR: Failed to copy Orderer TLS CA to ${NODE_IP}. Skipping this node."; NODE_COUNTER=$((NODE_COUNTER+1)); continue; }
-
-    # --- 4. Configure docker-compose.yaml with Coordinator IP on Swarm Node ---
-    echo "4. Updating docker-compose.yaml with Coordinator IP on ${NODE_IP}..."
-    ssh "${SWARM_NODE_SSH_USER}@${NODE_IP}" "cd ${SWARM_NODE_PROJECT_ROOT_PATH} && \
-        sed -i 's/COORDINATOR_DEVICE_IP/${COORDINATOR_DEVICE_IP}/g' docker-compose.yaml" \
-        || { echo "ERROR: Failed to update docker-compose.yaml on ${NODE_IP}. Skipping this node."; NODE_COUNTER=$((NODE_COUNTER+1)); continue; }
-
-    # --- 5. Bring up Swarm Node Application ---
-    echo "5. Building and bringing up 'swarm_node_app' on ${NODE_IP}..."
-    ssh "${SWARM_NODE_SSH_USER}@${NODE_IP}" "cd ${SWARM_NODE_PROJECT_ROOT_PATH} && \
-        docker-compose build swarm_node_app && \
-        NODE_ID=${NODE_ID} docker-compose up -d swarm_node_app" \
-        || { echo "ERROR: Failed to bring up swarm_node_app on ${NODE_IP}. Skipping this node."; NODE_COUNTER=$((NODE_COUNTER+1)); continue; }
-
-    echo "--- Swarm Node Runner: ${NODE_IP} (ID: ${NODE_ID}) Deployment Complete! ---"
-    echo "Verify service: ssh ${SWARM_NODE_SSH_USER}@${NODE_IP} 'docker ps -f name=swarm_node_app_${NODE_ID}'"
-    echo "Check logs: ssh ${SWARM_NODE_SSH_USER}@${NODE_IP} 'docker logs swarm_node_app_${NODE_ID}'"
-
-    NODE_COUNTER=$((NODE_COUNTER+1))
+    echo "--- Swarm Node '${NODE_ID}' deployed successfully ---"
 done
 
-echo ""
-echo "--- All Swarm Node Runners Deployment Process Finished! ---"
-echo "Review the output for any errors or skipped nodes."
+echo "All Swarm Nodes deployment scripts initiated."
+echo "Check logs on each node using 'docker logs <NODE_ID>'."
