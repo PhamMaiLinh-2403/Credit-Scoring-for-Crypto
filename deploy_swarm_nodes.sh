@@ -10,8 +10,6 @@ SWARM_NODE_SSH_USER="ubuntu"
 SSH_KEY_PATH="/home/ubuntu/.ssh/my-swarm-key.pem"
 
 # Danh sách các IP RIÊNG TƯ (Private IPs) của các Swarm Node Runners
-# BẠN CẦN LẤY CÁC IP NÀY TỪ AWS CONSOLE SAU KHI TẠO CÁC INSTANCE
-# Sẽ chỉ có 2 IP cho 2 node 'risk' và 'crm'
 SWARM_NODE_IPS=(
     "PRIVATE_IP_OF_RISK_NODE"  # Ví dụ: 10.0.1.10
     "PRIVATE_IP_OF_CRM_NODE"   # Ví dụ: 10.0.1.11
@@ -55,10 +53,10 @@ for i in "${!SWARM_NODE_IPS[@]}"; do
     echo "--- Deploying Swarm Node '${NODE_ID}' at IP: ${NODE_IP} ---"
 
     # 1. Cập nhật mã nguồn và Dockerfile trên Swarm Node
-    run_on_remote "${NODE_IP}" "cd ${SWARM_NODE_PROJECT_ROOT_PATH} && git pull origin main"
+    run_on_remote "${NODE_IP}" "cd ${SWARM_NODE_PROJECT_ROOT_PATH} && git pull origin main" || { echo "ERROR: Git pull failed for ${NODE_ID}. Exiting."; exit 1; }
 
     # 2. Xây dựng lại Docker Image
-    run_on_remote "${NODE_IP}" "cd ${SWARM_NODE_PROJECT_ROOT_PATH} && docker build -f swarm_node/Dockerfile -t swarm_node_app ."
+    run_on_remote "${NODE_IP}" "cd ${SWARM_NODE_PROJECT_ROOT_PATH} && docker build -f swarm_node/Dockerfile -t swarm_node_app ." || { echo "ERROR: Docker build failed for ${NODE_ID}. Exiting."; exit 1; }
 
     # 3. Dừng và xóa container cũ nếu có
     run_on_remote "${NODE_IP}" "docker stop ${NODE_ID} || true"
@@ -71,10 +69,16 @@ for i in "${!SWARM_NODE_IPS[@]}"; do
         -e COORDINATOR_ENDPOINT=http://${COORDINATOR_DEVICE_IP}:8001 \
         -e NODE_PORT=8000 \
         -e S3_BUCKET_NAME=${S3_BUCKET_NAME} \
-        swarm_node_app"
+        swarm_node_app" || { echo "ERROR: Docker run failed for ${NODE_ID}. Exiting."; exit 1; }
+
+    # Optional: Sleep for a few seconds to ensure the container starts properly
+    sleep 5
+
+    # 5. Kiểm tra trạng thái container mới
+    run_on_remote "${NODE_IP}" "docker ps -q -f name=${NODE_ID}" || { echo "ERROR: Docker container for ${NODE_ID} is not running. Exiting."; exit 1; }
 
     echo "--- Swarm Node '${NODE_ID}' deployed successfully ---"
 done
 
 echo "All Swarm Nodes deployment scripts initiated."
-echo "Check logs on each node using 'docker logs <NODE_ID>'."
+echo "Check logs on each node using 'docker logs <NODE_ID>' for troubleshooting."
