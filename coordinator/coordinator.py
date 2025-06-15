@@ -4,8 +4,8 @@ import os
 import json
 import threading
 import random
-import hashlib # Make sure hashlib is imported for hashing
-
+import hashlib
+import boto3  # Thêm boto3 để tương tác với S3
 from flask import Flask, request, jsonify
 
 from shared_libs.central_registry import CentralRegistry
@@ -27,40 +27,31 @@ class Coordinator:
         self._received_updates_this_round = {}
         self._updates_expected_count = 0
         self._round_completion_event = threading.Event()
-        self._update_lock = threading.Lock() # To protect _received_updates_this_round
+        self._update_lock = threading.Lock()  # To protect _received_updates_this_round
 
         # Dictionary to store node endpoints for direct communication
         self.node_endpoints = {}
 
-        # --- ADD THIS LINE: Initialize the BlockchainClientSDK ---
-        self.blockchain_client = BlockchainClientSDK(client_id=coordinator_id) 
-        # In a real setup, you might pass a config dictionary here for cert paths, etc.
-        # Example: self.blockchain_client = BlockchainClientSDK(client_id=coordinator_id, config={'cert_path': 'path/to/cert.pem'})
-        # --------------------------------------------------------
+        # Initialize the BlockchainClientSDK
+        self.blockchain_client = BlockchainClientSDK(client_id=coordinator_id)
 
         print(f"Coordinator '{self.coordinator_id}' initialized.")
 
     def _initialize_global_model(self):
-        # A simple initial global model for demonstration
-        # In a real scenario, this might come from a pre-trained model or be all zeros
-        # Need to know all possible features across all nodes to initialize.
-        # For simplicity, let's assume some common features.
-        model_path = '/app/models/latest_global_model.json'
-
-        if os.path.exists(model_path):
-            with open(model_path, 'r') as f:
-                print('Coordinator: Loaded existing global model from disk')
-                return json.load(f)
-        else:
-            print('Coordinator: No existing global model found. Creating a new one.')
-            return None
+        """Tạo mô hình toàn cục mới nếu không có mô hình hiện có từ S3."""
+        print("Coordinator: No existing global model found. Creating a new one.")
+        # Tạo mô hình toàn cục mới với các tham số khởi tạo mặc định
+        # Cập nhật theo các feature của bạn
+        return {
+            'coef': {'feature1': 0, 'feature2': 0, 'feature3': 0},  
+            'intercept': 0
+        }
 
     def register_node(self, node_id, endpoint_url):
         print(f"Coordinator: Received registration request for Node {node_id} at {endpoint_url}")
         success = self.central_registry.register_node(node_id, endpoint_url)
         if success:
-            # Also add to our local dictionary if not already there, for direct communication
-            with self._update_lock: # Protect access to node_endpoints
+            with self._update_lock:  # Protect access to node_endpoints
                 if node_id not in self.node_endpoints:
                     self.node_endpoints[node_id] = endpoint_url
                     print(f"Coordinator: Added Node {node_id} to active endpoints.")
@@ -71,8 +62,8 @@ class Coordinator:
         print("[STEP 1: Distributing Global Model]")
         registered_nodes = self.central_registry.get_registered_nodes()
         self._updates_expected_count = len(registered_nodes)
-        self._received_updates_this_round = {} # Reset for new round
-        self._round_completion_event.clear() # Clear the event for the new round
+        self._received_updates_this_round = {}  # Reset for new round
+        self._round_completion_event.clear()  # Clear the event for the new round
 
         if not registered_nodes:
             print("Coordinator: No nodes to distribute model to.")
@@ -80,8 +71,7 @@ class Coordinator:
 
         for node_id, endpoint_url in registered_nodes.items():
             try:
-                # Assuming nodes have an endpoint to receive the model
-                target_url = f"{endpoint_url}/model_update" 
+                target_url = f"{endpoint_url}/model_update"
                 headers = {'Content-Type': 'application/json'}
                 payload = {
                     'round_num': self.current_round,
@@ -91,7 +81,6 @@ class Coordinator:
                 print(f"Coordinator: Sent global model to node {node_id}")
             except requests.exceptions.RequestException as e:
                 print(f"Coordinator: Error sending model to node {node_id} at {endpoint_url}: {e}")
-                # Potentially unregister the node or mark as inactive
 
     def receive_model_update(self, node_id, round_num, local_model):
         with self._update_lock:
@@ -108,12 +97,11 @@ class Coordinator:
 
             if len(self._received_updates_this_round) >= self._updates_expected_count:
                 print("Coordinator: All expected updates received for this round. Signaling completion.")
-                self._round_completion_event.set() # Signal that all updates are in
+                self._round_completion_event.set()  # Signal that all updates are in
             return True
 
     def wait_for_local_updates(self, timeout=60):
         print(f"\n[STEP 2: Waiting for Local Updates (Timeout: {timeout} seconds)]")
-        # Wait for the event to be set, or for the timeout to expire
         completed = self._round_completion_event.wait(timeout)
         if not completed and len(self._received_updates_this_round) < self._updates_expected_count:
             print("Coordinator: Timeout waiting for all local model updates. Proceeding with received updates.")
@@ -129,11 +117,8 @@ class Coordinator:
             print("Coordinator: No nodes registered. Skipping round.")
             return
 
-        # Reset for the new round and distribute the global model
         self.distribute_global_model()
-        
-        # Wait for local updates from participating nodes
-        self.wait_for_local_updates(timeout=60) # Wait up to 60 seconds for updates
+        self.wait_for_local_updates(timeout=60)  # Wait up to 60 seconds for updates
 
         # --- STEP 3: Aggregation ---
         print("\n[STEP 3: Aggregating received models]")
@@ -151,7 +136,6 @@ class Coordinator:
         aggregation_hash = hashlib.sha256(aggregated_model_json).hexdigest()
         
         print(f"\n[STEP 4: Recording Aggregation Hash]")
-        # CALL THE BLOCKCHAIN SDK HERE
         try:
             self.blockchain_client.record_aggregation_hash(
                 round_num=self.current_round, 
@@ -161,10 +145,9 @@ class Coordinator:
             print(f"Coordinator: Aggregation hash recorded on blockchain for round {self.current_round}.")
         except Exception as e:
             print(f"Coordinator: ERROR recording aggregation hash on blockchain: {e}")
-        # ------------------------------------
         
         # --- Save the model after each round to a volume ---
-        model_save_dir = "/app/models" # Mounted via Docker volume
+        model_save_dir = "/app/models"  # Mounted via Docker volume
         os.makedirs(model_save_dir, exist_ok=True)
         model_filename = f"global_model_round_{self.current_round}.json"
         model_filepath = os.path.join(model_save_dir, model_filename)
@@ -173,6 +156,13 @@ class Coordinator:
             with open(model_filepath, 'w') as f:
                 json.dump(self.current_global_model, f)
             print(f"Coordinator: Global model for round {self.current_round} saved to {model_filepath}")
+            
+            # Lưu mô hình lên S3
+            s3_bucket_name = os.environ.get('S3_BUCKET_NAME', 'durian-bucket-titan')
+            s3_key = f"models/global_model_round_{self.current_round}.json"
+            s3 = boto3.client('s3')
+            s3.upload_file(model_filepath, s3_bucket_name, s3_key)
+            print(f"Coordinator: Global model for round {self.current_round} uploaded to S3://{s3_bucket_name}/{s3_key}")
         except Exception as e:
             print(f"Coordinator: ERROR saving model for round {self.current_round}: {e}")
 
@@ -181,8 +171,7 @@ class Coordinator:
 
 
 # --- Flask Application Setup ---
-# Initialize the Coordinator instance (globally accessible for Flask routes)
-Coordinator.instance = None # Will be set in if __name__ == '__main__'
+Coordinator.instance = None  # Will be set in if __name__ == '__main__'
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -217,14 +206,14 @@ def start_training_rounds():
     """Function to continuously run swarm learning rounds."""
     MAX_ROUNDS = 5
     round_count = 0
-    while round_count <MAX_ROUNDS:
-        time.sleep(5) # Wait a bit before starting the next round
+    while round_count < MAX_ROUNDS:
+        time.sleep(5)  # Wait a bit before starting the next round
         if Coordinator.instance.central_registry.get_registered_nodes():
             Coordinator.instance.run_swarm_learning_round()
             round_count += 1
         else:
             print("Coordinator: No nodes registered. Waiting for registrations...")
-            time.sleep(10) # Wait longer if no nodes are registered
+            time.sleep(10)  # Wait longer if no nodes are registered
     print(f'Coordinator: Training completed after {MAX_ROUNDS} rounds.')
 
 if __name__ == '__main__':
@@ -235,10 +224,8 @@ if __name__ == '__main__':
 
     # Start a separate thread for running the training rounds
     training_thread = threading.Thread(target=start_training_rounds)
-    training_thread.daemon = True # Allow the main program to exit even if this thread is running
+    training_thread.daemon = True  # Allow the main program to exit even if this thread is running
     training_thread.start()
 
     # Run the Flask application
-    # This will be accessible on the host's port 5000 (default) inside a Docker container
-    # For Docker, you usually bind to '0.0.0.0' to be accessible externally
-    app.run(host='0.0.0.0', port=5000, debug=False) 
+    app.run(host='0.0.0.0', port=5000, debug=False)
